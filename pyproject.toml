@@ -1,0 +1,12 @@
+[project]
+name = "inr-voronoi"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "open3d>=0.19.0",
+    "scikit-image>=0.25.2",
+    "torch>=2.7.1",
+    "tqdm>=4.67.1",
+]
