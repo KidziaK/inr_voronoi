@@ -3,57 +3,50 @@ import open3d as o3d
 import torch
 
 from model import Siren, train_siren_on_points, reconstruct_mesh
-from preprocess import load_center_scale_mesh
-from dataclasses import dataclass
-from enum import Enum
+from preprocess import points_from_ground_truth
+from voronoi import voronoi_from_points
 
-class Model(Enum):
-    SIMPLE = Siren
+Mesh = o3d.geometry.TriangleMesh
 
-@dataclass
-class Config:
-    model: Model = Model.SIMPLE
+def train_single_and_reconstruct(on_mani_pts: torch.Tensor, epochs: int = 500) -> Mesh:
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(on_mani_pts.cpu().numpy())
+    aabb = pcd.get_axis_aligned_bounding_box()
 
-    gt_path: str = "/home/mikolaj/Documents/github/inr_voronoi/data/00000003/00000003_ground_truth.obj"
-    on_manifold_points_num: int = 10000
-    off_manifold_points_num: int = 20000
-    reconstruction_resolution: int = 256
+    n = len(on_mani_pts)
 
-    in_features: int = 3
-    hidden_features: int = 256
-    hidden_layers: int = 5
-    out_features: int = 1
+    padding = (aabb.max_bound - aabb.min_bound).max()
 
-    epochs: int = 500
+    off_mani_points_np = np.random.uniform(aabb.min_bound - padding , aabb.max_bound + padding, size=(2 * n, 3))
+    off_mani_points = torch.tensor(off_mani_points_np, dtype=torch.float32, device="cuda")
 
-    device = "cuda"
-
-def train_single(config: Config) -> o3d.geometry.TriangleMesh:
-    rescaled_ground_truth = load_center_scale_mesh(config.gt_path)
-    pc = rescaled_ground_truth.sample_points_poisson_disk(number_of_points=config.on_manifold_points_num)
-
-    on_manifold_points_np = np.asarray(pc.points)
-    off_manifold_points_np = np.random.uniform(-0.50, 0.50, size=(config.off_manifold_points_num, 3))
-
-    on_manifold_points = torch.tensor(on_manifold_points_np, dtype=torch.float32, device=config.device)
-    off_manifold_points = torch.tensor(off_manifold_points_np, dtype=torch.float32, device=config.device)
-
-    model = config.model.value(
-        in_features=config.in_features,
-        hidden_features=config.hidden_features,
-        hidden_layers=config.hidden_layers,
-        out_features=config.out_features,
+    model = Siren(
+        in_features=3,
+        hidden_features=256,
+        hidden_layers=5,
+        out_features=1,
     )
-    model.to(config.device)
+    model.to("cuda")
 
-    train_siren_on_points(model, on_manifold_points, off_manifold_points, epochs=config.epochs, verbose=True)
+    train_siren_on_points(model, on_mani_pts, off_mani_points, epochs=epochs, verbose=True)
 
-    reconstructed_mesh = reconstruct_mesh(model, resolution=config.reconstruction_resolution, device=config.device)
+
+
+    reconstructed_mesh = reconstruct_mesh(model, aabb, resolution=256, device="cuda")
     return reconstructed_mesh
 
+
 if __name__ == "__main__":
-    config = Config()
+    o3d.utility.random.seed(69)
 
-    reconstruction = train_single(config)
+    gt_path: str = "/home/mikolaj/Documents/github/inr_voronoi/data/00000003/00000003_ground_truth.obj"
 
-    o3d.visualization.draw_geometries([reconstruction])
+    on_manifold_points, off_manifold_points = points_from_ground_truth(gt_path)
+    off_manifold_points_np = off_manifold_points.cpu().numpy()
+
+    voronoi_cells = voronoi_from_points(on_manifold_points, visualize=False, verbose=True)
+
+    for i, on_pts in enumerate(voronoi_cells):
+        reconstruction = train_single_and_reconstruct(on_pts, epochs=10000)
+        o3d.visualization.draw_geometries([reconstruction])
+        o3d.io.write_triangle_mesh(f"/home/mikolaj/Documents/github/inr_voronoi/reconstructions/{i:02d}.ply", reconstruction)

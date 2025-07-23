@@ -1,21 +1,20 @@
-import torch
-import torch.nn as nn
+from typing import Tuple
 import numpy as np
 import open3d as o3d
-from typing import Tuple, List, Optional, Dict
-from pathlib import Path
+import torch
+import torch.nn as nn
+from skimage import measure
 from tqdm import tqdm
-from collections import defaultdict
 
 
 class SineLayer(nn.Module):
     def __init__(
-        self,
-        in_features: int,
-        out_features: int,
-        bias: bool = True,
-        is_first: bool = False,
-        omega_0: float = 30.0,
+            self,
+            in_features: int,
+            out_features: int,
+            bias: bool = True,
+            is_first: bool = False,
+            omega_0: float = 30.0,
     ):
         super().__init__()
         self.omega_0 = omega_0
@@ -40,14 +39,14 @@ class SineLayer(nn.Module):
 
 class Siren(nn.Module):
     def __init__(
-        self,
-        in_features: int,
-        hidden_features: int,
-        hidden_layers: int,
-        out_features: int,
-        outermost_linear: bool = True,
-        first_omega_0: float = 30.0,
-        hidden_omega_0: float = 30.0,
+            self,
+            in_features: int,
+            hidden_features: int,
+            hidden_layers: int,
+            out_features: int,
+            outermost_linear: bool = True,
+            first_omega_0: float = 30.0,
+            hidden_omega_0: float = 30.0,
     ):
         super().__init__()
 
@@ -95,12 +94,12 @@ class Siren(nn.Module):
 
 
 def train_siren_on_points(
-    model: Siren,
-    on_manifold_points: torch.Tensor,
-    off_manifold_points: torch.Tensor,
-    epochs: int = 1000,
-    lr: float = 1e-4,
-    verbose: bool = False,
+        model: Siren,
+        on_manifold_points: torch.Tensor,
+        off_manifold_points: torch.Tensor,
+        epochs: int = 1000,
+        lr: float = 1e-4,
+        verbose: bool = False,
 ) -> None:
     model.train()
     optim = torch.optim.Adam(lr=lr, params=model.parameters())
@@ -120,36 +119,44 @@ def train_siren_on_points(
 
 
 def reconstruct_mesh(
-    model: Siren, resolution: int = 128, device: str = "cpu"
+        model: Siren,
+        aabb: o3d.cuda.pybind.geometry.AxisAlignedBoundingBox,
+        resolution: int = 128,
+        device: str = "cpu"
 ) -> o3d.geometry.TriangleMesh:
     model.to(device)
     model.eval()
 
-    grid_vals = torch.linspace(-0.51, 0.51, resolution)
-    x, y, z = torch.meshgrid(grid_vals, grid_vals, grid_vals, indexing="ij")
+    x_vals = torch.linspace(aabb.min_bound[0], aabb.max_bound[0], resolution)
+    y_vals = torch.linspace(aabb.min_bound[1], aabb.max_bound[1], resolution)
+    z_vals = torch.linspace(aabb.min_bound[2], aabb.max_bound[2], resolution)
+
+    x, y, z = torch.meshgrid(x_vals, y_vals, z_vals, indexing="ij")
     points = torch.stack([x.flatten(), y.flatten(), z.flatten()], dim=1).to(device)
 
     sdf_values = []
     with torch.no_grad():
         for p in tqdm(
-            torch.split(points, 10000, dim=0), desc="Reconstructing", leave=False
+                torch.split(points, 10000, dim=0), desc="Reconstructing", leave=False
         ):
             sdf_values.append(model(p)[0].cpu())
     sdf_values = (
         torch.cat(sdf_values, dim=0).numpy().reshape(resolution, resolution, resolution)
     )
 
-    from skimage import measure
-
-    spacing_val = 1.0 / (resolution - 1)
     verts, faces, _, _ = measure.marching_cubes(
-        sdf_values, level=0.0, spacing=(spacing_val, spacing_val, spacing_val)
+        sdf_values, level=0.0
     )
 
-    verts -= 0.5
+    verts_normalized = verts / (resolution - 1)
+
+    aabb_min = aabb.min_bound
+    aabb_max = aabb.max_bound
+    side_lengths = aabb_max - aabb_min
+    verts_world = verts_normalized * side_lengths + aabb_min
 
     reconstructed_mesh = o3d.geometry.TriangleMesh()
-    reconstructed_mesh.vertices = o3d.utility.Vector3dVector(verts)
+    reconstructed_mesh.vertices = o3d.utility.Vector3dVector(verts_world)
     reconstructed_mesh.triangles = o3d.utility.Vector3iVector(faces)
     reconstructed_mesh.compute_vertex_normals()
 
@@ -157,13 +164,13 @@ def reconstruct_mesh(
 
 
 def sdf_siren_loss(
-    model_output: torch.Tensor,
-    coords: torch.Tensor,
-    num_on_mani: int,
-    alpha: float = 100.0,
-    lambda_on: float = 1.0,
-    lambda_dnm: float = 0.1,
-    lambda_eik: float = 0.1,
+        model_output: torch.Tensor,
+        coords: torch.Tensor,
+        num_on_mani: int,
+        alpha: float = 100.0,
+        lambda_on: float = 1.0,
+        lambda_dnm: float = 0.1,
+        lambda_eik: float = 0.1,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     on_manifold_pred = model_output[:num_on_mani]
     off_manifold_pred = model_output[num_on_mani:]
@@ -193,9 +200,9 @@ def sdf_siren_loss(
     eikonal_loss = ((gradients.norm(2, dim=1) - 1) ** 2).mean()
 
     total_loss = (
-        lambda_on * on_manifold_loss
-        + lambda_dnm * off_manifold_loss
-        + lambda_eik * eikonal_loss
+            lambda_on * on_manifold_loss
+            + lambda_dnm * off_manifold_loss
+            + lambda_eik * eikonal_loss
     )
 
     return total_loss, on_manifold_loss, off_manifold_loss, eikonal_loss
